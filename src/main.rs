@@ -1,35 +1,32 @@
 #[macro_use]
 extern crate log;
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::{io, process};
+use std::{fs, io, process};
+
+use anyhow::{Result, anyhow, bail};
 
 use clap::Parser;
-use serde::{Serialize, Deserialize};
-use serde_json;
+use serde::Deserialize;
 
+use base64;
 use radius::core::rfc3580::TUNNEL_TYPE_VLAN;
 use radius::core::tag::Tag;
-use sha2::{Sha256, Digest};
-use base64;
+use sha2::{Digest, Sha256};
 
 use async_trait::async_trait;
 use tokio::net::UdpSocket;
 use tokio::signal;
 
-use std::fs::File;
-
 use radius::core::code::Code;
-use radius::core::request::Request;
 use radius::core::packet::Packet;
-use radius::core::rfc2865::{lookup_user_password, lookup_nas_identifier};
+use radius::core::request::Request;
+use radius::core::rfc2865::{
+    NAS_PORT_TYPE_ETHERNET, lookup_nas_port_type, lookup_user_name, lookup_user_password,
+};
 use radius::core::rfc2868::{
-    add_tunnel_password,
-    add_tunnel_medium_type,
-    add_tunnel_type,
-    add_tunnel_private_group_id,
-    TUNNEL_MEDIUM_TYPE_IEEE_802,
+    TUNNEL_MEDIUM_TYPE_IEEE_802, add_tunnel_medium_type, add_tunnel_password,
+    add_tunnel_private_group_id, add_tunnel_type,
 };
 use radius::server::{RequestHandler, SecretProvider, SecretProviderError, Server};
 
@@ -38,50 +35,92 @@ use hex;
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    #[arg(default_value_t = ("::").to_owned(), short, long)]
+    #[arg(default_value = "::", short, long)]
     address: String,
     #[arg(default_value_t = 1812, short, long)]
     port: u16,
-    conf_file_path: String
+    config_file: String,
 }
 
-type NASIds = HashMap<
-    String,
-    HashMap<
-        String,
-        Option<PwdConfig>
-    >
->;
+#[derive(Deserialize, Debug)]
+#[serde(
+    rename_all = "SCREAMING_SNAKE_CASE",
+    tag = "wlan_access_type",
+    content = "wlan_access_parameter"
+)]
+enum WlanAccessType {
+    NoAccess,
+    FixedPsk(String),
+    HmacPsk(String),
+}
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Debug)]
+struct Network {
+    name: String,
+    #[serde(flatten)]
+    wlan_access: WlanAccessType,
+    vlan_id: u16,
+    mac_addrs: Vec<MACAddr>,
+}
+
+#[derive(Deserialize, Debug)]
+struct Networks {
+    fallback_network: String,
+    #[serde(rename = "network")]
+    networks: Vec<Network>,
+}
+
+impl Networks {
+    fn network_for_mac(&self, mac: &MACAddr) -> Result<&Network> {
+        for n in &self.networks {
+            if n.mac_addrs.contains(mac) {
+                return Ok(&n);
+            }
+        }
+        for n in &self.networks {
+            if n.name == self.fallback_network {
+                return Ok(&n);
+            }
+        }
+        bail!("Couldn't find a fallback network")
+    }
+}
+
+#[derive(Deserialize, Debug)]
 struct ConfigFile {
-    nas_ids: NASIds,
-    secret: String
+    radius_secret: String,
+    hmac_psk_len: usize,
+    networks: Networks,
 }
 
-#[derive(Deserialize, Serialize)]
-struct PwdConfig {
-    ppsk_byte_len: Option<usize>,
-    vlan_id: Option<u16>
+fn read_config(path: &str) -> Result<ConfigFile> {
+    let config_text = io::read_to_string(fs::File::open(path)?)?;
+    Ok(toml::from_str(&config_text)?)
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<()> {
     env_logger::init();
 
     let args = Args::parse();
 
-    let config: ConfigFile = serde_json::from_reader(
-        File::open(args.conf_file_path).unwrap()
-    ).unwrap();
+    let config = match read_config(&args.config_file) {
+        Ok(c) => c,
+        Err(e) => bail!("Couldn't read config file '{}': {}", args.config_file, e),
+    };
 
     // start UDP listening
+    let secprov = MySecretProvider {
+        secret: config.radius_secret.clone().into_bytes(),
+    };
     let mut server = match Server::listen(
         &args.address,
         args.port,
-        MyRequestHandler { nas_ids: config.nas_ids },
-        MySecretProvider { secret: config.secret.into_bytes() }
-    ).await {
+        MyRequestHandler { config: config },
+        secprov,
+    )
+    .await
+    {
         Ok(server) => server,
         Err(err) => {
             error!("Failed to start server: {}", err.to_string());
@@ -98,15 +137,47 @@ async fn main() {
     );
 
     // start the loop to handle the RADIUS requests
-    if let Err(err) = server.run(signal::ctrl_c()).await {
-        error!("Failed to close server {}", err.to_string());
-        process::exit(1);
-    } else {
-        info!("Exit");
+    server.run(signal::ctrl_c()).await?;
+    Ok(())
+}
+
+#[derive(Debug, PartialEq)]
+struct MACAddr([u8; 6]);
+
+impl<'de> serde::Deserialize<'de> for MACAddr {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let str = String::deserialize(deserializer)?;
+        let result = hex::decode(str.replace(":", "")).map_err(|e| serde::de::Error::custom(e))?;
+        let res = result
+            .try_into()
+            .map_err(|_| serde::de::Error::custom("Err"))?;
+        Ok(Self(res))
     }
 }
 
-type MACAddr = [u8; 6];
+impl From<[u8; 6]> for MACAddr {
+    fn from(val: [u8; 6]) -> Self {
+        Self(val)
+    }
+}
+
+impl TryFrom<Vec<u8>> for MACAddr {
+    type Error = anyhow::Error;
+
+    fn try_from(val: Vec<u8>) -> Result<Self, Self::Error> {
+        let val = val.as_array().ok_or(anyhow!("Conversion error"))?;
+        Ok(Self(*val))
+    }
+}
+
+impl AsRef<[u8]> for MACAddr {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
 
 fn parse_mac_address(addr: &Vec<u8>) -> Option<MACAddr> {
     let result = hex::decode(&addr[..]).ok()?;
@@ -123,58 +194,64 @@ fn get_ppsk(master_pwd: &String, mac: &MACAddr, bytes: usize) -> String {
 }
 
 fn get_mac_from_request(req: &Packet) -> Option<(String, Option<MACAddr>)> {
-    let mac_vec = lookup_user_password(req)?.ok()?;
+    let mac_vec = match lookup_user_password(req) {
+        Some(Ok(pw)) => pw,
+        _ => lookup_user_name(req)?.ok()?.into_bytes(),
+    };
     let mac_str = String::from_utf8(mac_vec.clone()).ok()?;
     Some((mac_str, parse_mac_address(&mac_vec)))
 }
 
 struct MyRequestHandler {
-    nas_ids: NASIds
+    config: ConfigFile,
 }
 
-fn add_tunnel_info(vlan_id: Option<u16>, ppsk: &String, tag: &Tag, resp: &mut Packet) {
-    let to_sized = |message: &[u8]| [vec![message.len() as u8], message.to_vec()].concat();
-    add_tunnel_password(resp, Some(&tag), &to_sized(&ppsk.as_bytes())[..]).unwrap();
-    if let Some(vlan_id) = vlan_id {
-        add_tunnel_type(resp, Some(&tag), TUNNEL_TYPE_VLAN);
-        add_tunnel_medium_type(resp, Some(&tag), TUNNEL_MEDIUM_TYPE_IEEE_802);
-        add_tunnel_private_group_id(resp, Some(&tag), &vlan_id.to_string().as_str());
+fn add_tunnel_info(vlan_id: u16, ppsk: Option<&String>, tag: &Tag, resp: &mut Packet) {
+    if let Some(ppsk) = ppsk {
+        let to_sized = |message: &[u8]| [vec![message.len() as u8], message.to_vec()].concat();
+        add_tunnel_password(resp, Some(&tag), &to_sized(&ppsk.as_bytes())[..]).unwrap();
     }
+    add_tunnel_type(resp, Some(&tag), TUNNEL_TYPE_VLAN);
+    add_tunnel_medium_type(resp, Some(&tag), TUNNEL_MEDIUM_TYPE_IEEE_802);
+    add_tunnel_private_group_id(resp, Some(&tag), &vlan_id.to_string().as_str());
 }
 
-fn answer_packet(handler: &MyRequestHandler, req: &Packet) -> Result<Packet, String> {
-    let nas_id = match lookup_nas_identifier(req) {
-        None => {
-            return Err("Request has no nas identifier".to_string());
-        },
-        Some(Err(error)) => {
-            return Err(format!("Failed to read nas identifier: {}", error.to_string()));
-        },
-        Some(Ok(id)) => {
-            id
-        }
-    };
+fn answer_packet(handler: &MyRequestHandler, req: &Packet) -> Result<Packet> {
     let (mac_str, mac_addr) = match get_mac_from_request(req) {
         Some((mac_str, None)) => {
-            return Err(format!("Failed to parse MAC address {mac_str:?}"));
-        },
+            return Err(anyhow!("Failed to parse MAC address {mac_str:?}"));
+        }
         None => {
-            return Err("Failed to get MAC address from request".to_string());
-        },
-        Some((mac_str, Some(mac_addr))) => (mac_str, mac_addr)
+            return Err(anyhow!("Failed to get MAC address from request"));
+        }
+        Some((mac_str, Some(mac_addr))) => (mac_str, mac_addr),
     };
-    let nas_passwords = handler.nas_ids.get(&nas_id)
-        .ok_or(format!("Unidentified nas id {nas_id:?}"))?;
+
+    let port_type = match lookup_nas_port_type(req) {
+        Some(Ok(t)) => Some(t),
+        _ => None,
+    };
+
+    let network = handler.config.networks.network_for_mac(&mac_addr)?;
+
+    let ppsk = match port_type {
+        Some(NAS_PORT_TYPE_ETHERNET) => None,
+        _ => match &network.wlan_access {
+            WlanAccessType::NoAccess => None,
+            WlanAccessType::FixedPsk(psk) => Some(psk),
+            WlanAccessType::HmacPsk(key) => {
+                Some(&get_ppsk(&key, &mac_addr, handler.config.hmac_psk_len))
+            }
+        },
+    };
 
     let mut resp = req.make_response_packet(Code::AccessAccept);
-    info!("serving PPSK for station {mac_str}");
-    for (tag, (master_pwd, config)) in nas_passwords.iter().enumerate() {
-        let config = config.as_ref().unwrap_or(&PwdConfig { ppsk_byte_len: None, vlan_id: None });
-        let ppsk_byte_len = config.ppsk_byte_len.unwrap_or(12);
+    info!(
+        "Assigning {mac_str} to network {} (vlan {})",
+        network.name, network.vlan_id
+    );
+    add_tunnel_info(network.vlan_id, ppsk, &Tag::new(1), &mut resp);
 
-        let ppsk = get_ppsk(master_pwd, &mac_addr, ppsk_byte_len);
-        add_tunnel_info(config.vlan_id, &ppsk, &Tag::new(tag as u8), &mut resp);
-    }
     Ok(resp)
 }
 
@@ -185,7 +262,6 @@ impl RequestHandler<(), io::Error> for MyRequestHandler {
         conn: &UdpSocket,
         req: &Request,
     ) -> Result<(), io::Error> {
-
         let req_packet = req.get_packet();
 
         let resp = answer_packet(&self, &req_packet).unwrap_or_else(|err| {
@@ -193,17 +269,14 @@ impl RequestHandler<(), io::Error> for MyRequestHandler {
             req_packet.make_response_packet(Code::AccessReject)
         });
 
-        conn.send_to(
-            &resp.encode().unwrap(),
-            req.get_remote_addr(),
-        )
-        .await?;
+        conn.send_to(&resp.encode().unwrap(), req.get_remote_addr())
+            .await?;
         Ok(())
     }
 }
 
 struct MySecretProvider {
-    secret: Vec<u8>
+    secret: Vec<u8>,
 }
 
 impl SecretProvider for MySecretProvider {
