@@ -23,8 +23,8 @@ use radius::core::code::Code;
 use radius::core::packet::Packet;
 use radius::core::request::Request;
 use radius::core::rfc2865::{
-    NAS_PORT_TYPE_WIRELESS_802_11, lookup_calling_station_id, lookup_nas_port_type,
-    lookup_user_name, lookup_user_password,
+    NAS_PORT_TYPE_WIRELESS_802_11, lookup_calling_station_id, lookup_nas_identifier,
+    lookup_nas_port_type, lookup_user_name, lookup_user_password,
 };
 use radius::core::rfc2868::{
     TUNNEL_MEDIUM_TYPE_IEEE_802, add_tunnel_medium_type, add_tunnel_password,
@@ -242,6 +242,10 @@ fn add_tunnel_info(vlan_id: u16, ppsk: Option<&String>, tag: &Tag, resp: &mut Pa
 fn answer_packet(handler: &MyRequestHandler, req: &Packet) -> Result<Packet> {
     let mac_addr = get_mac_from_request(req)?;
 
+    let Some(Ok(nas_id)) = lookup_nas_identifier(req) else {
+        bail!("Failed to get NAS ID from request");
+    };
+
     let port_type = match lookup_nas_port_type(req) {
         Some(Ok(t)) => Some(t),
         _ => None,
@@ -251,7 +255,7 @@ fn answer_packet(handler: &MyRequestHandler, req: &Packet) -> Result<Packet> {
 
     let ppsk = match port_type {
         Some(NAS_PORT_TYPE_WIRELESS_802_11) => match &network.wlan_access {
-            WlanAccessType::NoAccess => bail!("No WLAN access on network{}", network.name),
+            WlanAccessType::NoAccess => bail!("No WLAN access on network {}", network.name),
             WlanAccessType::FixedPsk(psk) => Some(psk),
             WlanAccessType::HmacPsk(key) => {
                 Some(&get_ppsk(&key, &mac_addr, handler.config.hmac_psk_len))
@@ -262,7 +266,7 @@ fn answer_packet(handler: &MyRequestHandler, req: &Packet) -> Result<Packet> {
 
     let mut resp = req.make_response_packet(Code::AccessAccept);
     info!(
-        "Assigning {mac_addr} to network {} (vlan {})",
+        "Assigning {mac_addr} on {nas_id} to network {} (vlan {})",
         network.name, network.vlan_id
     );
     add_tunnel_info(network.vlan_id, ppsk, &Tag::new(1), &mut resp);
