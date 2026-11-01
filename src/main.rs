@@ -1,6 +1,7 @@
 #[macro_use]
 extern crate log;
 
+use std::fmt;
 use std::net::SocketAddr;
 use std::{fs, io, process};
 
@@ -22,7 +23,8 @@ use radius::core::code::Code;
 use radius::core::packet::Packet;
 use radius::core::request::Request;
 use radius::core::rfc2865::{
-    NAS_PORT_TYPE_ETHERNET, lookup_nas_port_type, lookup_user_name, lookup_user_password,
+    NAS_PORT_TYPE_ETHERNET, lookup_calling_station_id, lookup_nas_port_type, lookup_user_name,
+    lookup_user_password,
 };
 use radius::core::rfc2868::{
     TUNNEL_MEDIUM_TYPE_IEEE_802, add_tunnel_medium_type, add_tunnel_password,
@@ -150,11 +152,18 @@ impl<'de> serde::Deserialize<'de> for MACAddr {
         D: serde::Deserializer<'de>,
     {
         let str = String::deserialize(deserializer)?;
-        let result = hex::decode(str.replace(":", "")).map_err(|e| serde::de::Error::custom(e))?;
-        let res = result
-            .try_into()
-            .map_err(|_| serde::de::Error::custom("Err"))?;
-        Ok(Self(res))
+        let res = Self::try_from(str).map_err(|e| serde::de::Error::custom(e))?;
+        Ok(res)
+    }
+}
+
+impl TryFrom<String> for MACAddr {
+    type Error = anyhow::Error;
+
+    fn try_from(val: String) -> Result<Self> {
+        let parts = val.split(&['-', ':']);
+        let res: Result<Vec<u8>> = parts.map(|i| Ok(u8::from_str_radix(i, 16)?)).collect();
+        Ok(res?.try_into()?)
     }
 }
 
@@ -179,9 +188,19 @@ impl AsRef<[u8]> for MACAddr {
     }
 }
 
-fn parse_mac_address(addr: &Vec<u8>) -> Option<MACAddr> {
-    let result = hex::decode(&addr[..]).ok()?;
-    result.try_into().ok()
+impl fmt::Display for MACAddr {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            self.0[0], self.0[1], self.0[2], self.0[3], self.0[4], self.0[5]
+        )
+    }
+}
+
+fn parse_mac_address(addr: &Vec<u8>) -> Result<MACAddr> {
+    let result = hex::decode(&addr[..])?;
+    result.try_into()
 }
 
 fn get_ppsk(master_pwd: &String, mac: &MACAddr, bytes: usize) -> String {
@@ -193,13 +212,17 @@ fn get_ppsk(master_pwd: &String, mac: &MACAddr, bytes: usize) -> String {
     base64::encode(&trunc)
 }
 
-fn get_mac_from_request(req: &Packet) -> Option<(String, Option<MACAddr>)> {
-    let mac_vec = match lookup_user_password(req) {
-        Some(Ok(pw)) => pw,
-        _ => lookup_user_name(req)?.ok()?.into_bytes(),
-    };
-    let mac_str = String::from_utf8(mac_vec.clone()).ok()?;
-    Some((mac_str, parse_mac_address(&mac_vec)))
+fn get_mac_from_request(req: &Packet) -> Result<MACAddr> {
+    match lookup_calling_station_id(req) {
+        Some(Ok(id)) => id.try_into(),
+        _ => match lookup_user_password(req) {
+            Some(Ok(pw)) => parse_mac_address(&pw),
+            _ => match lookup_user_name(req) {
+                Some(Ok(user)) => user.try_into(),
+                _ => Err(anyhow!("Couldn't get MAC address from request")),
+            },
+        },
+    }
 }
 
 struct MyRequestHandler {
@@ -217,15 +240,7 @@ fn add_tunnel_info(vlan_id: u16, ppsk: Option<&String>, tag: &Tag, resp: &mut Pa
 }
 
 fn answer_packet(handler: &MyRequestHandler, req: &Packet) -> Result<Packet> {
-    let (mac_str, mac_addr) = match get_mac_from_request(req) {
-        Some((mac_str, None)) => {
-            return Err(anyhow!("Failed to parse MAC address {mac_str:?}"));
-        }
-        None => {
-            return Err(anyhow!("Failed to get MAC address from request"));
-        }
-        Some((mac_str, Some(mac_addr))) => (mac_str, mac_addr),
-    };
+    let mac_addr = get_mac_from_request(req)?;
 
     let port_type = match lookup_nas_port_type(req) {
         Some(Ok(t)) => Some(t),
@@ -247,7 +262,7 @@ fn answer_packet(handler: &MyRequestHandler, req: &Packet) -> Result<Packet> {
 
     let mut resp = req.make_response_packet(Code::AccessAccept);
     info!(
-        "Assigning {mac_str} to network {} (vlan {})",
+        "Assigning {mac_addr} to network {} (vlan {})",
         network.name, network.vlan_id
     );
     add_tunnel_info(network.vlan_id, ppsk, &Tag::new(1), &mut resp);
