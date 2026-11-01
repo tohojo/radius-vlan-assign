@@ -23,8 +23,8 @@ use radius::core::code::Code;
 use radius::core::packet::Packet;
 use radius::core::request::Request;
 use radius::core::rfc2865::{
-    NAS_PORT_TYPE_ETHERNET, lookup_calling_station_id, lookup_nas_port_type, lookup_user_name,
-    lookup_user_password,
+    NAS_PORT_TYPE_WIRELESS_802_11, lookup_calling_station_id, lookup_nas_port_type,
+    lookup_user_name, lookup_user_password,
 };
 use radius::core::rfc2868::{
     TUNNEL_MEDIUM_TYPE_IEEE_802, add_tunnel_medium_type, add_tunnel_password,
@@ -250,14 +250,14 @@ fn answer_packet(handler: &MyRequestHandler, req: &Packet) -> Result<Packet> {
     let network = handler.config.networks.network_for_mac(&mac_addr)?;
 
     let ppsk = match port_type {
-        Some(NAS_PORT_TYPE_ETHERNET) => None,
-        _ => match &network.wlan_access {
-            WlanAccessType::NoAccess => None,
+        Some(NAS_PORT_TYPE_WIRELESS_802_11) => match &network.wlan_access {
+            WlanAccessType::NoAccess => bail!("No WLAN access on network{}", network.name),
             WlanAccessType::FixedPsk(psk) => Some(psk),
             WlanAccessType::HmacPsk(key) => {
                 Some(&get_ppsk(&key, &mac_addr, handler.config.hmac_psk_len))
             }
         },
+        _ => None,
     };
 
     let mut resp = req.make_response_packet(Code::AccessAccept);
