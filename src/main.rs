@@ -283,10 +283,13 @@ impl RequestHandler<(), io::Error> for MyRequestHandler {
     ) -> Result<(), io::Error> {
         let req_packet = req.get_packet();
 
-        let resp = answer_packet(&self, &req_packet).unwrap_or_else(|err| {
+        let mut resp = answer_packet(&self, &req_packet).unwrap_or_else(|err| {
             error!("{}", err);
             req_packet.make_response_packet(Code::AccessReject)
         });
+
+        resp.add_hmac(&self.config.radius_secret.as_bytes())
+            .unwrap();
 
         conn.send_to(&resp.encode().unwrap(), req.get_remote_addr())
             .await?;
