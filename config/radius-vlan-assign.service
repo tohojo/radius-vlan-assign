@@ -8,7 +8,7 @@ ExecStart=/usr/local/bin/radius-vlan-assign /etc/network-vlan-config.toml
 Environment=RUST_LOG=info
 DynamicUser=true
 ProtectSystem=strict
-ProtectHome=strict
+ProtectHome=true
 ProtectKernelTunables=true
 ProtectControlGroups=true
 PrivateTmp=true
