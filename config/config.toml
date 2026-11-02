@@ -1,0 +1,26 @@
+radius_secret = "secret"
+hmac_psk_len = 12
+
+[networks]
+fallback_network = "LAN"
+
+[[networks.network]]
+name = "LAN"
+wlan_access_type = "FIXED_PSK"
+wlan_access_secret = "my_psk"
+vlan_id = 1
+mac_addrs = []
+
+[[networks.network]]
+name = "dmz"
+wlan_access_type = "NO_ACCESS"
+vlan_id = 2
+mac_addrs = ["aa:bb:cc:dd:ee:ff"]
+
+[[networks.network]]
+name = "Lab"
+wlan_access_type = "HMAC_PSK"
+wlan_access_secret = "my_hmac_secret"
+vlan_id = 3
+mac_addrs = ["bb:cc:dd:ee:ff:00"]
+
