@@ -30,9 +30,13 @@ use radius::core::rfc2868::{
     TUNNEL_MEDIUM_TYPE_IEEE_802, add_tunnel_medium_type, add_tunnel_password,
     add_tunnel_private_group_id, add_tunnel_type,
 };
+use radius::core::rfc2869::{add_eap_message, lookup_eap_message};
 use radius::server::{RequestHandler, SecretProvider, SecretProviderError, Server};
 
 use hex;
+
+const EAP_SUCCESS: [u8; 4] = [0x03, 0x01, 0x00, 0x04];
+const EAP_FAILURE: [u8; 4] = [0x04, 0x01, 0x00, 0x04];
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -271,6 +275,10 @@ fn answer_packet(handler: &MyRequestHandler, req: &Packet) -> Result<Packet> {
     );
     add_tunnel_info(network.vlan_id, ppsk, &Tag::new(1), &mut resp);
 
+    if lookup_eap_message(req).is_some() {
+        add_eap_message(&mut resp, &EAP_SUCCESS);
+    }
+
     Ok(resp)
 }
 
@@ -285,7 +293,11 @@ impl RequestHandler<(), io::Error> for MyRequestHandler {
 
         let mut resp = answer_packet(&self, &req_packet).unwrap_or_else(|err| {
             error!("{}", err);
-            req_packet.make_response_packet(Code::AccessReject)
+            let mut resp = req_packet.make_response_packet(Code::AccessReject);
+            if lookup_eap_message(&req_packet).is_some() {
+                add_eap_message(&mut resp, &EAP_FAILURE);
+            }
+            resp
         });
 
         resp.add_hmac(&self.config.radius_secret.as_bytes())
