@@ -1,0 +1,19 @@
+[Unit]
+Description=RADIUS VLAN assignment service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/radius-vlan-assign /etc/network-vlan-config.toml
+Environment=RUST_LOG=info
+DynamicUser=true
+ProtectSystem=strict
+ProtectHome=strict
+ProtectKernelTunables=true
+ProtectControlGroups=true
+PrivateTmp=true
+PrivateDevices=true
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target
