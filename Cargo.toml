@@ -1,5 +1,5 @@
 [package]
-name = "radius_wpa_psk"
+name = "radius-vlan-assign"
 version = "0.1.0"
 edition = "2024"
 
