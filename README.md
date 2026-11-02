@@ -1,6 +1,17 @@
-# RADIUS server for stateless PPSKs
+# RADIUS server for VLAN assignment and stateless PPSKs
 
-A Rust implementation of [hostapd-slppsk](https://github.com/fakuivan/hostapd-slppsk).
+A Rust implementation of a radius server that allows assigning VLANs to WiFi
+access points (using hostapd) and Unifi enterprise switch ports (using Unifi
+802.1X support).
+
+The code is forked from
+[hostapd-slppsk-radius](https://github.com/fakuivan/hostapd-slppsk-radius) but
+updated with a new config format and support for assigning VLANs to wired
+switches as well.
+
+## HMAC-PSK support
+
+The HMAC-PSK idea comes from [hostapd-slppsk](https://github.com/fakuivan/hostapd-slppsk).
 The main difference being that it does not use the `wpa_psk_file` config, instead it uses
 `wpa_psk_radius` to request the PPSK for each station. The generated PPSKs should be exactly
 the same to hostapd-slppsk given the same Master Password and configs.
