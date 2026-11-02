@@ -55,7 +55,7 @@ struct Args {
 #[serde(
     rename_all = "SCREAMING_SNAKE_CASE",
     tag = "wlan_access_type",
-    content = "wlan_access_parameter"
+    content = "wlan_access_secret"
 )]
 enum WlanAccessType {
     NoAccess,
