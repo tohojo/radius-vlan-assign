@@ -11,9 +11,10 @@ use clap::Parser;
 use serde::Deserialize;
 
 use base64;
+use hmac::{Hmac, KeyInit, Mac};
 use radius::core::rfc3580::TUNNEL_TYPE_VLAN;
 use radius::core::tag::Tag;
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 
 use async_trait::async_trait;
 use tokio::net::UdpSocket;
@@ -34,6 +35,8 @@ use radius::core::rfc2869::{add_eap_message, lookup_eap_message};
 use radius::server::{RequestHandler, SecretProvider, SecretProviderError, Server};
 
 use hex;
+
+type HmacSha256 = Hmac<Sha256>;
 
 const EAP_SUCCESS: [u8; 4] = [0x03, 0x01, 0x00, 0x04];
 const EAP_FAILURE: [u8; 4] = [0x04, 0x01, 0x00, 0x04];
@@ -207,11 +210,10 @@ fn parse_mac_address(addr: &Vec<u8>) -> Result<MACAddr> {
     result.try_into()
 }
 
-fn get_ppsk(master_pwd: &String, mac: &MACAddr, bytes: usize) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(master_pwd.as_bytes());
-    hasher.update(mac);
-    let hashed = hasher.finalize();
+fn get_ppsk(secret: &String, mac: &MACAddr, bytes: usize) -> String {
+    let mut hmac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+    hmac.update(mac.as_ref());
+    let hashed = hmac.finalize().into_bytes();
     let (trunc, _) = hashed.split_at(bytes);
     base64::encode(&trunc)
 }
