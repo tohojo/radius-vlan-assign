@@ -109,7 +109,7 @@ fn read_config(path: &str) -> Result<ConfigFile> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init();
+    env_logger::builder().format_timestamp(None).init();
 
     let args = Args::parse();
 
